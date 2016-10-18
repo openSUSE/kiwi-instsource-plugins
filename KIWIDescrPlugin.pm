@@ -154,10 +154,8 @@ sub executeDir {
     my $cpeid = $coll->productData()->getInfo("CPEID");
     my $repoid = $coll->productData()->getInfo("REPOID");
     my $createrepomd = $coll->productData()->getVar("CREATE_REPOMD");
-    my $metadataonly = $coll->productData()->getVar("RPMHDRS_ONLY");
     my $targetdir;
     my $newtargetdir;
-    my $params = "$this->{m_params} -H" ? $metadataonly eq "true" : "$this->{m_params}";
     ## this ugly bit creates a parameter string from a list of directories:
     # param = -d <dir1> -d <dir2> ...
     # the order is important. Idea: use map to make hash <dir> => -d for
@@ -174,7 +172,7 @@ sub executeDir {
         );
         $targetdir = $paths[0]."/".$descrdir;
         $cmd = "$this->{m_tooldir}/$this->{m_tool} "
-            . "$pathlist $params -o "
+            . "$pathlist $this->{m_params} -o "
             . $paths[0]
             . "/"
             . $descrdir;
@@ -235,18 +233,23 @@ sub executeDir {
         );
         return 1;
     }
-    if (-x "/usr/bin/openSUSE-appstream-process") {
-        foreach my $p (@paths) {
-            $cmd = "/usr/bin/openSUSE-appstream-process";
-            $cmd .= " $p";
-            $cmd .= " $p/$descrdir";
-            $call = $this -> callCmd($cmd);
-            $status = $call->[0];
+    if ((-x "/usr/bin/extract-appdata-icons") &&
+        (-s "$targetdir/appdata.xml")
+    ) {
+        $cmd = "/usr/bin/extract-appdata-icons "
+            . "$targetdir/appdata.xml $targetdir";
+        $call = $this -> callCmd($cmd);
+        $status = $call->[0];
+        if($status) {
             my $out = join("\n",@{$call->[1]});
-            $this->logMsg("I",
+            $this->logMsg("E",
                 "Called <$cmd> exit status: <$status> output: $out"
             );
-        };
+            return 1;
+        }
+        if($this->{m_compress} =~ m{yes}i) {
+            system("gzip", "--rsyncable", "$targetdir/appdata.xml");
+        }
     }
     if($this->{m_compress} =~ m{yes}i) {
         foreach my $pfile(glob("$targetdir/packages*")) {
@@ -303,18 +306,44 @@ sub createRepositoryMetadata {
             );
             return 0;
         }
-        if (-x "/usr/bin/openSUSE-appstream-process")
-        {
-            $cmd = "/usr/bin/openSUSE-appstream-process";
-            $cmd .= " $p/$datadir";
-            $cmd .= " $p/$datadir/repodata";
-
+        my $newtargetdir = "$p/$datadir/repodata";
+        if ((-x "/usr/bin/extract-appdata-icons") && 
+            (-s "$newtargetdir/appdata.xml")
+        ) {
+            $cmd = "/usr/bin/extract-appdata-icons "
+                . "$newtargetdir/appdata.xml $newtargetdir";
             $call = $this -> callCmd($cmd);
             $status = $call->[0];
-            my $out = join("\n",@{$call->[1]});
-            $this->logMsg("I",
-                "Called $cmd exit status: <$status> output: $out"
-            );
+            if($status) {
+                my $out = join("\n",@{$call->[1]});
+                $this->logMsg("E",
+                    "Called $cmd exit status: <$status> output: $out"
+                );
+                return 1;
+            }
+            if($this->{m_compress} =~ m{yes}i) {
+                system("gzip", "--rsyncable", "$newtargetdir/appdata.xml");
+            }
+        }
+        if ((-x "/usr/bin/extract-appdata-icons") &&
+            (-s "$targetdir/appdata.xml")
+        ) {
+            $newtargetdir = "$p/$datadir/repodata";
+            system("cp $targetdir/appdata.xml $newtargetdir/appdata.xml");
+            $cmd = "/usr/bin/extract-appdata-icons "
+                . "$newtargetdir/appdata.xml $newtargetdir";
+            $call = $this -> callCmd($cmd);
+            $status = $call->[0];
+            if($status) {
+                my $out = join("\n",@{$call->[1]});
+                $this->logMsg("E",
+                    "Called $cmd exit status: <$status> output: $out"
+                );
+                return 1;
+            }
+            if($this->{m_compress} =~ m{yes}i) {
+                system("gzip", "--rsyncable", "$newtargetdir/appdata.xml");
+            }
         }
         if ( -f "/usr/bin/add_product_susedata" ) {
             my $kwdfile = abs_path(

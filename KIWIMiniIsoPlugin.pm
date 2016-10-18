@@ -1,5 +1,5 @@
 ################################################################
-# Copyright (c) 2014, 2015 SUSE LLC
+# Copyright (c) 2014 SUSE
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -27,7 +27,6 @@ use Config::IniFiles;
 use File::Find;
 use FileHandle;
 use Carp;
-use File::Basename qw /dirname/;
 
 sub new {
     # ...
@@ -123,33 +122,20 @@ sub execute {
             return $retval;
         }
     }
-    
-    my @rootfiles;
-    find(
-        sub { find_cb($this, '.*/root$', \@rootfiles) },
-        $this->handler()->collect()->basedir()
-    );
-    if (@rootfiles) {
-        $this->removeInstallSystem($rootfiles[0]);
-    }
-
-    my @isolxfiles;
-    find(
-        sub { find_cb($this, '.*/isolinux.cfg$', \@isolxfiles) },
-        $this->handler()->collect()->basedir()
-    );
-    if (@isolxfiles) {
-        $this->removeMediaCheck($isolxfiles[0]);
-    }
-
-    $this -> updateInitRDNET($repoloc);
-
     my @gfxbootfiles;
     find(
         sub { find_cb($this, '.*/gfxboot\.cfg$', \@gfxbootfiles) },
         $this->handler()->collect()->basedir()
     );
-
+    my @rootfiles;
+    find(
+        sub { find_cb($this, '.*/root$', \@rootfiles) },
+        $this->handler()->collect()->basedir()
+    );
+    foreach(@rootfiles) {
+        $this->logMsg("I", "removing file <$_>");
+        unlink $_;
+    }
     if (!@gfxbootfiles) {
         my $msg = "No gfxboot.cfg file found! "
             . "This _MIGHT_ be ok for S/390. "
@@ -157,71 +143,11 @@ sub execute {
         $this->logMsg("W", $msg);
         return $retval;
     }
+    $this -> updateEFIGrubConfig($repoloc);
     $retval = $this -> updateGraphicsBootConfig (
         \@gfxbootfiles, $repoloc, $srv, $path
     );
-
     return $retval;
-}
-
-sub removeInstallSystem {
-    my $this = shift;
-    my $rootfile = shift;
-
-    print STDERR "RF $rootfile\n";
-    my $rootdir = dirname($rootfile);
-    $this->logMsg("I", "removing files from <$rootdir>");
-    foreach my $file (glob("$rootdir/*")) {
-        if (-f $file && $file !~ m,/(efi|linux|initrd)$,) {
-            $this->logMsg("I", "removing <$file>");
-	    unlink $file;
-        }
-    }
-    return $this;
-}
-
-sub removeMediaCheck {
-	my $this = shift;
-	my $cfg = shift;
-
-	$this->logMsg("I", "Processing file <$cfg>: ");
-
-    my $CFG = FileHandle -> new();
-    if (! $CFG -> open($cfg)) {
-		$this->logMsg("E", "Cant open file <$cfg>!");
-		return;
-	}
-
-    my $CFGNEW = FileHandle -> new();
-    if (! $CFGNEW -> open(">$cfg.new")) {
-		$this->logMsg("E", "Cant open file <$cfg.new>!");
-		return;
-	}
-
-	my $mediacheck = -1;
-	while ( <$CFG> ) {
-		chomp;
-
-		if (m/label mediachk/) {
-			$mediacheck = 1;
-		}
-		if ($mediacheck == 1 && m/^\s*$/) {
-			$mediacheck = -1;
-		}
-
-		if ($mediacheck == 1) {
-			print $CFGNEW "#$_\n";
-		} else {
-			print $CFGNEW "$_\n";
-		}
-	}
-
-	$CFG -> close();
-	$CFGNEW -> close();
-
-	unlink $cfg;
-	rename "$cfg.new", $cfg;
-    return $this;
 }
 
 sub updateGraphicsBootConfig {
@@ -295,68 +221,38 @@ sub updateGraphicsBootConfig {
     return $retval;
 }
 
-# borrowed from obs with permission from mls@suse.de to license as
-# GPLv2+
-sub _makecpiohead {
-    my ($name, $s) = @_;
-    return "07070100000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000b00000000TRAILER!!!\0\0\0\0" if !$s;
-    #        magic ino
-    my $h = "07070100000000";
-    # mode                S_IFREG
-    $h .= sprintf("%08x", oct(100000) | $s->[2]&oct(777));
-    #      uid     gid     nlink
-    $h .= "000000000000000000000001";
-    $h .= sprintf("%08x%08x", $s->[9], $s->[7]);
-    $h .= "00000000000000000000000000000000";
-    $h .= sprintf("%08x", length($name) + 1);
-    $h .= "00000000$name\0";
-    $h .= substr("\0\0\0\0", (length($h) & 3)) if length($h) & 3;
-    my $pad = '';
-    $pad = substr("\0\0\0\0", ($s->[7] & 3)) if $s->[7] & 3;
-    return ($h, $pad);
-}
-
-# append a config snippet to initrd that instructs linuxrc to use
-# download.opensuse.org
-# https://bugzilla.opensuse.org/show_bug.cgi?id=916175
-sub updateInitRDNET {
-    my ($this, $repoloc) = @_;
-
-    $this -> logMsg("I", "prepare initrd for NET iso");
-
-    my $zipper = KIWIGlobals -> instance() -> getKiwiConfig() -> {IrdZipperCommand};
-
-    # FIXME: looks like IrdZipperCommand is not configured correctly
-    # in openSUSE product files to match installation-images so
-    # hardcode for now
-    $zipper = "xz --check=crc32";
-
-    my $linuxrc = "defaultrepo=$repoloc\n";
-
-    my ($cpio, $pad) = _makecpiohead('./etc/linuxrc.d/10_repo', [0, 0, oct(644), 1, 0, 0, 0, length($linuxrc), 0, 0, 0]);
-    $cpio .= $linuxrc;
-    $cpio .= $pad if $pad;
-    $cpio .= _makecpiohead();
-
-    my @initrdfiles;
-    find(
-        sub { find_cb($this, '.*/initrd$', \@initrdfiles) },
-        $this->handler()->collect()->basedir()
-    );
-
-    $this -> logMsg("E", "no initrds found!") unless @initrdfiles;
-
-    for my $initrd (@initrdfiles) {
-        $this -> logMsg("I", "updating $initrd with $repoloc");
-        my $fh  = FileHandle -> new();
-        if (! $fh -> open("|$zipper -c >> $initrd")) {
-        #if (! $fh -> open(">$initrd.append")) {
-            croak "Cant launch $zipper for $initrd: $!";
-        }
-        print $fh $cpio;
-        $fh -> close();
+sub updateEFIGrubConfig {
+    my $this = shift;
+    my $repoloc = shift;
+    my $grubcfg = $this->collect()
+        ->basesubdirs()->{1} . "/EFI/BOOT/grub.cfg";
+    if (! -f $grubcfg ) {
+        $this->logMsg("I", "no grub.cfg at <$grubcfg>");
+        return;
     }
-    return;
+    $this->logMsg("I", "editing <$grubcfg>");
+    my $IN  = FileHandle -> new();
+    my $OUT = FileHandle -> new();
+    if (! $IN -> open($grubcfg)) {
+        croak "Cant open file for reading $grubcfg: $!";
+    }
+    if (! $OUT -> open(">$grubcfg.new")) {
+        croak "Cant open file for writing $grubcfg.new: $!";
+    }
+    while(<$IN>) {
+        my $line = $_;
+        chomp $line;
+        $this->logMsg("I", "-$line");
+        $line =~
+            s,(linuxefi /boot/x86_64/loader/linux),$1 install=$repoloc,x;
+        $this->logMsg("I", "+$line");
+        print $OUT "$line\n";
+    }
+    $OUT -> close();
+    $IN  -> close(); 
+    $this -> callCmd("diff -u $grubcfg $grubcfg.new");
+    rename("$grubcfg.new", $grubcfg);
+    return $this;
 }
 
 sub find_cb {
